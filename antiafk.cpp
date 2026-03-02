@@ -1,12 +1,11 @@
 #include <windows.h>
+#include <tlhelp32.h>
+#include <iostream>
 #include <vector>
 #include <string>
-#include <iostream>
 #include <thread>
 #include <chrono>
 #include <mutex>
-#include <tlhelp32.h>
-#include <shellapi.h>
 
 std::mutex mtx;
 
@@ -24,7 +23,6 @@ std::vector<HWND> GetRoblox() {
         }
         CloseHandle(snap);
     }
-    if (pids.empty()) return {};
 
     struct SearchData {
         std::vector<DWORD> pids;
@@ -53,94 +51,80 @@ std::vector<HWND> GetRoblox() {
     return data.windows;
 }
 
-void ForceFocus(HWND hwnd) {
-    DWORD threadId = GetWindowThreadProcessId(hwnd, nullptr);
-    DWORD currentThread = GetCurrentThreadId();
-
+bool ForceFocusWithRetry(HWND hwnd, int maxRetries = 5) {
+    int attempts = 0;
     DWORD lockTimeout = 0;
     SystemParametersInfo(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, &lockTimeout, 0);
     SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, (PVOID)0, SPIF_SENDWININICHANGE);
 
-    AttachThreadInput(currentThread, threadId, TRUE);
-    ShowWindow(hwnd, SW_RESTORE);
-    BringWindowToTop(hwnd);
-    SetForegroundWindow(hwnd);
-    SetActiveWindow(hwnd);
-    SetFocus(hwnd);
-    AttachThreadInput(currentThread, threadId, FALSE);
+    while (attempts < maxRetries) {
+        if (GetForegroundWindow() == hwnd) return true;
+
+        DWORD threadId = GetWindowThreadProcessId(hwnd, nullptr);
+        DWORD currentThread = GetCurrentThreadId();
+
+        AttachThreadInput(currentThread, threadId, TRUE);
+        ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
+        BringWindowToTop(hwnd);
+        SetActiveWindow(hwnd);
+        SetFocus(hwnd);
+        AttachThreadInput(currentThread, threadId, FALSE);
+
+        Sleep(300);
+        if (GetForegroundWindow() == hwnd) {
+            SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, (PVOID)(DWORD_PTR)lockTimeout, SPIF_SENDWININICHANGE);
+            return true;
+        }
+        attempts++;
+    }
 
     SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, (PVOID)(DWORD_PTR)lockTimeout, SPIF_SENDWININICHANGE);
+    return false;
 }
 
 void SendSpaceToWindow(HWND hwnd, int index) {
     std::lock_guard<std::mutex> lock(mtx);
-
-    HWND prev = GetForegroundWindow();
-
-    ForceFocus(hwnd);
-    Sleep(400);
-
-    HWND focused = GetForegroundWindow();
-    std::cout << "  [" << index << "] hwnd=" << hwnd
-        << " focused=" << focused
-        << (focused == hwnd ? " [OK]" : " [NO FOCUS]") << "\n";
-
-    keybd_event(VK_SPACE, MapVirtualKey(VK_SPACE, MAPVK_VK_TO_VSC), 0, 0);
-    Sleep(100);
-    keybd_event(VK_SPACE, MapVirtualKey(VK_SPACE, MAPVK_VK_TO_VSC), KEYEVENTF_KEYUP, 0);
-    Sleep(300);
-
-    keybd_event(VK_SPACE, MapVirtualKey(VK_SPACE, MAPVK_VK_TO_VSC), 0, 0);
-    Sleep(100);
-    keybd_event(VK_SPACE, MapVirtualKey(VK_SPACE, MAPVK_VK_TO_VSC), KEYEVENTF_KEYUP, 0);
-    Sleep(200);
-
-    if (prev && prev != hwnd) {
-        DWORD prevThread = GetWindowThreadProcessId(prev, nullptr);
-        DWORD currentThread = GetCurrentThreadId();
-        AttachThreadInput(currentThread, prevThread, TRUE);
-        SetForegroundWindow(prev);
-        SetActiveWindow(prev);
-        AttachThreadInput(currentThread, prevThread, FALSE);
+    if (ForceFocusWithRetry(hwnd)) {
+        std::cout << " [" << index << "] hwnd=" << hwnd << " [OK]\n";
+        for (int i = 0; i < 2; i++) {
+            keybd_event(VK_SPACE, MapVirtualKey(VK_SPACE, MAPVK_VK_TO_VSC), 0, 0);
+            Sleep(100);
+            keybd_event(VK_SPACE, MapVirtualKey(VK_SPACE, MAPVK_VK_TO_VSC), KEYEVENTF_KEYUP, 0);
+            Sleep(200);
+        }
+    }
+    else {
+        std::cout << " [" << index << "] hwnd=" << hwnd << " [NO FOCUS]\n";
     }
 }
 
 bool IsRunningAsAdmin() {
     BOOL isAdmin = FALSE;
     PSID adminGroup = NULL;
-
     SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
-
-    if (AllocateAndInitializeSid(
-        &NtAuthority,
-        2,
-        SECURITY_BUILTIN_DOMAIN_RID,
-        DOMAIN_ALIAS_RID_ADMINS,
-        0, 0, 0, 0, 0, 0,
-        &adminGroup))
-    {
+    if (AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup)) {
         CheckTokenMembership(NULL, adminGroup, &isAdmin);
         FreeSid(adminGroup);
     }
-
     return isAdmin;
 }
 
-
 int main() {
-    SetConsoleOutputCP(1250);
     if (!IsRunningAsAdmin()) {
         char path[MAX_PATH];
         GetModuleFileNameA(NULL, path, MAX_PATH);
-
         ShellExecuteA(NULL, "runas", path, NULL, NULL, SW_SHOWNORMAL);
         return 0;
     }
+
     std::cout << "Anti-AFK for Roblox ( MULTI INSTANCE SUPPORT )\n";
-    std::cout << "dont click anything on your pc while afking\n";
+    std::cout << "keyboard and mouse will be blocked during cycle\n";
     std::cout << "if u want to stop just close this app\n\n";
     std::cout << "Starting in 5 seconds\n\n";
+
     Sleep(5000);
+
     while (true) {
         auto windows = GetRoblox();
 
@@ -149,10 +133,14 @@ int main() {
         }
         else {
             std::cout << "[+] " << windows.size() << " instances:\n";
+
+            BlockInput(TRUE);
             for (size_t i = 0; i < windows.size(); i++) {
                 SendSpaceToWindow(windows[i], (int)i + 1);
                 Sleep(800);
             }
+            BlockInput(FALSE);
+
             std::cout << "[*] Done. Next in 10 minutes.\n\n";
         }
 
