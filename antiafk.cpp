@@ -10,7 +10,7 @@
 
 std::mutex mtx;
 
-std::vector<HWND> GetRobloxBetaWindows() {
+std::vector<HWND> GetRoblox() {
     std::vector<DWORD> pids;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap != INVALID_HANDLE_VALUE) {
@@ -142,7 +142,7 @@ int main() {
     std::cout << "Starting in 5 seconds\n\n";
     Sleep(5000);
     while (true) {
-        auto windows = GetRobloxBetaWindows();
+        auto windows = GetRoblox();
 
         if (windows.empty()) {
             std::cout << "[!] No RobloxPlayerBeta.exe\n";
